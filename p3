@@ -1,0 +1,228 @@
+三、分析一个字符设备驱动程序结构。
+#include<linux/module.h>
+#include<linux/init.h>
+#include <linux/moduleparam.h>
+#include<linux/kernel.h>
+#include <linux/slab.h>
+#include<linux/types.h>
+#include<linux/fs.h>
+#include<linux/errno.h>
+#include<linux/mm.h>
+#include<linux/sched.h>
+#include<linux/cdev.h>
+#include<asm/io.h>
+#include<asm/system.h>
+#include<asm/uaccess.h>
+
+#define MEMDEV_SIZE  0x1000  
+#define MEM_CLEAR  0x1  
+#define MEMDEV_MAJOR 0  
+/* 驱动程序为每一类设备分配一个主设备号用于区分不同类型的设备，同时为同一类型的设备分配不同的次设备号，加以区分，字符设备的主设备号为0 */
+
+int memdev_major = MEMDEV_MAJOR;
+module_param(memdev_major, int, S_IRUGO);
+struct memdev_dev{
+    struct cdev cdev;/*cdev 结构体*/
+    unsigned char mem[MEMDEV_SIZE];  /*内存的大小*/
+};
+
+struct memdev_dev  *memdev_devp;  /*设备结构体指针*/
+
+/* 下面是字符设备具体功能的实现，如打开，关闭，字符读取等 */
+/* 文件打开函数，系统调用open()最终落实到这个memdev_open() */
+static int memdev_open(struct inode *inodep,struct file *filp)
+{
+    /* 将设备结构体指针赋值给文件私有数据指针，从而实现驱动程序内部与外部文件间字符的传输交流 */
+    filp->private_data = memdev_devp;
+    return 0;
+}
+
+/* 文件释放函数,系统调用close()最终落实到这个memdev_release() */
+static int memdev_release(struct inode *inodep,struct file *filp)
+{
+    return 0;
+}
+
+/* 文件读函数，系统调用read()最终落实到这个memdev_read()，实现驱动程序向外部文件传输数据 */
+static ssize_t memdev_read(struct file *filp,char __user *buf,size_t size,loff_t *ppos)
+{
+    unsigned long p = *ppos;
+    unsigned int count = size;
+    int ret = 0;
+
+    /* 获得设备结构体指针，将本驱动程序中包含的字符设备指针传递给临时字符设备指针dev */
+    struct memdev_dev *dev = filp->private_data;
+
+    if(p >= MEMDEV_SIZE)
+        return 0;
+    if(count > MEMDEV_SIZE - p)
+        count = MEMDEV_SIZE - p;
+
+/* 向外部文件buf传输count个驱动程序的字符设备中的字符数据，如果失败，则返回错误类型，如果成功，则在控制台输出警告，并返回输出的字符数 */
+    if(copy_to_user(buf,(void *)dev->mem+p,count)){
+        ret = -EFAULT;
+    }
+    else{
+        *ppos += count;
+        ret = count;
+
+        printk(KERN_WARNING "Read %u byte(s) from %lu \n",count,p);
+    }
+    return ret;
+}
+
+/*文件写函数，系统调用write()最终落实到这个memdev_write()，实现驱动程序从外部文件写入数据*/
+static ssize_t memdev_write(struct file *filp,const char __user *buf,size_t size,loff_t *ppos)
+{
+    unsigned long p = *ppos;
+    unsigned int count = size;
+    int ret = 0;
+
+/* 获得设备结构体指针，将本驱动程序中包含的字符设备指针传递给临时字符设备指针dev */
+    struct memdev_dev *dev = filp->private_data;
+
+    if(p >= MEMDEV_SIZE)
+        return 0;
+    if(count > MEMDEV_SIZE - p)
+        count = MEMDEV_SIZE - p;
+
+/* 从外部文件buf向驱动程序的字符设备传入count个字符数据，如果失败，则返回错误类型，如果成功，则在控制台输出警告，并返回写入的字符数 */
+    if(copy_from_user(dev->mem + p,buf,count))
+        ret = -EFAULT;
+    else{
+        *ppos += count;
+        ret = count;
+
+        printk(KERN_WARNING "Written %u byte(s) from %lu \n",count,p);
+    }
+    return ret;
+}
+
+/* 设备控制函数，系统调用ioctl()最终落实到这个memdev_ioctl()，用于清空该驱动程序的字符设备中的字符 */
+static int memdev_ioctl(struct inode *inodep,struct file *filp,unsigned int cmd,unsigned long arg)
+{
+    struct memdev_dev *dev = filp->private_data;
+
+    switch(cmd){
+        case MEM_CLEAR:
+            memset(dev->mem,0,MEMDEV_SIZE);  /* 清空字符设备 */
+            printk(KERN_WARNING "memdev has set to zero.\n");
+            break;
+
+        default:
+            return -EINVAL;
+    }
+    return 0;
+}
+
+/* 文件定位函数，系统调用seek()最终落实到这个memdev_llseek() */
+static loff_t memdev_llseek(struct file *filp,loff_t offset,int whence)
+{
+    loff_t ret = 0;
+    switch(whence){
+        case 0:  /*相对文件开始位置偏移*/
+            if(offset < 0){
+                ret = -EINVAL;
+                break;
+            }
+            if((unsigned int )offset > MEMDEV_SIZE){
+                ret = -EINVAL;
+                break;
+            }
+
+            filp->f_pos = (unsigned int)offset;
+            ret = filp->f_pos;
+            break;
+
+        case 1:  /*相对文件当前位置偏移*/
+            if((filp->f_pos + offset) < 0){
+                ret = -EINVAL;
+                break;
+            }
+            if((filp->f_pos + offset) > MEMDEV_SIZE){
+                ret = -EINVAL;
+                break;
+            }
+
+            filp->f_pos += (unsigned int)offset;
+            ret = filp->f_pos;
+          break;
+        default:
+            ret = -EINVAL;
+            break;
+    }
+    return ret;
+}
+
+/*文件操作结构体--file_operations */  
+static const struct file_operations memdev_fops = {  
+    .owner = THIS_MODULE,  
+    .open = memdev_open,  
+    .release = memdev_release,    
+    .read = memdev_read,  
+    .write = memdev_write,  
+    .ioctl = memdev_ioctl,  
+    .llseek = memdev_llseek,  
+};  
+  
+/*初始化cdev,添加注册cdev*/  
+static void memdev_setup_cdev(struct memdev_dev *dev,int index)  
+{  
+    int err,devno = MKDEV(memdev_major,index);  
+  
+    cdev_init(&dev->cdev,&memdev_fops);  
+    dev->cdev.owner = THIS_MODULE;  
+    dev->cdev.ops = &memdev_fops;  
+    err = cdev_add(&dev->cdev,devno,1);  
+  
+    if(err)  
+        printk(KERN_WARNING "Error %d adding memdev %d",err,index);  
+}  
+/*设备驱动模块加载函数*/  
+static int __init memdev_init(void)  
+{  
+    int result;  
+    dev_t devno = MKDEV(memdev_major,0); //分配一个dev_t 设备编号  
+  
+    /*申请设备号*/  
+    if(memdev_major)  /*申请成功时，加载模块后，在/dev/目录下会新生成memdev这个文件节点*/  
+        result = register_chrdev_region(devno,1,"memdev");   
+    else{     /*动态申请设备号*/  
+            result = alloc_chrdev_region(&devno, 0, 1, "memdev");  
+            memdev_major = MAJOR(devno);  
+    }  
+    if(result<0)  
+        return result;  
+  
+    /*动态申请设备结构体的内存*/  
+    memdev_devp = kmalloc(sizeof(struct memdev_dev),GFP_KERNEL);  
+    if(!memdev_devp){  /*动态申请设备结构体的内存失败*/  
+        result = -ENOMEM;  
+        goto fail_malloc;  /*失败处理*/  
+    }  
+  
+    memset(memdev_devp,0,sizeof(struct memdev_dev)); //清零  
+  
+    memdev_setup_cdev(memdev_devp,0);  
+    return 0;  
+fail_malloc:  
+                unregister_chrdev_region(devno, 1);  
+                return result;  
+}  
+/*驱动模块卸载函数*/  
+static void __exit memdev_exit(void)  
+{  
+    cdev_del(&memdev_devp->cdev); //注销cdev结构  
+    kfree(memdev_devp);          //释放设备结构体内存  
+    unregister_chrdev_region(MKDEV(memdev_major,0), 1);  //释放设备号  
+}  
+  
+module_init(memdev_init);  
+module_exit(memdev_exit);  
+  
+  
+  
+MODULE_AUTHOR("lwj<http://blog.csdn.net/lwj103862095>");  
+MODULE_LICENSE("Dual BSD/GPL");  
+MODULE_DESCRIPTION("a simple char driver in memory");
+
